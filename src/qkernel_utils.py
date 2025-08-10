@@ -23,18 +23,48 @@ def feature_map(x):
     qml.RX(x[1], wires=1)
     qml.CZ(wires=[0, 1])
 
+def feature_map_deep(x):
+    """Two-layer feature map with extra rotations for higher expressivity."""
+    x = np.asarray(x, dtype=float)
+    # Layer 1
+    qml.RX(x[0], wires=0)
+    qml.RX(x[1], wires=1)
+    qml.CZ(wires=[0, 1])
+    # Layer 2 (reuploading scaled features)
+    qml.RY(0.5 * x[0], wires=0)
+    qml.RY(0.5 * x[1], wires=1)
+    qml.CZ(wires=[0, 1])
+
 # ---------- kernel element (|<phi(x1)|phi(x2)>|^2) ----------
-def make_kernel_element(dev):
-    """Returns a function k(x1, x2) -> float using the given device."""
+def make_kernel_element(dev, fmap):
+    """Returns a function k(x1, x2) -> float using the given device and feature map."""
 
     @qml.qnode(dev)
     def _kernel_probs(x1, x2):
-        feature_map(x1)
-        qml.adjoint(feature_map)(x2)
+        fmap(x1)
+        qml.adjoint(fmap)(x2)
         return qml.probs(wires=[0, 1])  # [p00, p01, p10, p11]
 
     def k(x1, x2) -> float:
         return float(_kernel_probs(x1, x2)[0])  # probability of |00>
+    return k
+
+def make_cached_kernel_element(dev, fmap):
+    """Returns a cached kernel element function k(x1, x2) using given device & feature map."""
+    @qml.qnode(dev)
+    def _kernel_probs(x1, x2):
+        fmap(x1)
+        qml.adjoint(fmap)(x2)
+        return qml.probs(wires=[0, 1])  # returns full probability vector
+
+    @lru_cache(maxsize=None)
+    def _k_cached(x1_tup, x2_tup):
+        # take probability of |00> *outside* the QNode
+        return float(_kernel_probs(np.array(x1_tup), np.array(x2_tup))[0])
+
+    def k(x1, x2):
+        return _k_cached(tuple(np.asarray(x1, dtype=float)),
+                         tuple(np.asarray(x2, dtype=float)))
     return k
 
 # ---------- kernel matrix ----------
@@ -48,18 +78,6 @@ def quantum_kernel_matrix(XA, XB, k_elem):
             K[i, j] = k_elem(XA[i], XB[j])
     return K
 
-# Optional cached version (useful when XA/XB repeat)
-def make_cached_kernel_element(dev):
-    k_raw = make_kernel_element(dev)
-
-    @lru_cache(maxsize=None)
-    def _k_cached(x1_tup, x2_tup):
-        return k_raw(np.array(x1_tup), np.array(x2_tup))
-
-    def k(x1, x2):
-        return _k_cached(tuple(np.asarray(x1, dtype=float)),
-                         tuple(np.asarray(x2, dtype=float)))
-    return k
 
 # ---------- utilities ----------
 def to_angles(Z):
